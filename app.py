@@ -233,5 +233,9 @@ def areas():
 with app.app_context():
     db.create_all()
 
+@app.route('/')
+def hello():
+    return "Hello! Your feedback server is running."
+
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=5000, debug=True)
