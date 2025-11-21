@@ -262,5 +262,27 @@ def force_init_db():
         return "Database tables created successfully! You can now Sign Up."
     except Exception as e:
         return f"Error creating database: {str(e)}"
+
+# --- MAGIC ROUTE TO RESET DATABASE ---
+@app.route('/reset-db', methods=['GET'])
+def reset_db():
+    try:
+        with app.app_context():
+            db.drop_all()   # Delete everything (Clean slate)
+            db.create_all() # Create fresh tables
+            
+            # Create a test user automatically
+            test_user = User(username="admin")
+            test_user.set_password("password123")
+            db.session.add(test_user)
+            db.session.commit()
+            
+        return jsonify({
+            "message": "Database reset successfully!", 
+            "status": "Tables created",
+            "test_user": "admin / password123"
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=5000, debug=True)
