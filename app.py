@@ -1,3 +1,6 @@
+import eventlet
+eventlet.monkey_patch()
+# ... then your other imports (import os, requests, etc.)
 import os
 import requests
 from datetime import datetime, timedelta
