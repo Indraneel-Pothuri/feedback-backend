@@ -14,14 +14,14 @@ from flask_jwt_extended import JWTManager, create_access_token, jwt_required, ge
 basedir = os.path.abspath(os.path.dirname(__file__))
 app = Flask(__name__)
 
-# Database
+# Database Config
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///' + os.path.join(basedir, 'feedback.db'))
 if app.config['SQLALCHEMY_DATABASE_URI'].startswith("postgres://"):
     app.config['SQLALCHEMY_DATABASE_URI'] = app.config['SQLALCHEMY_DATABASE_URI'].replace("postgres://", "postgresql://", 1)
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# Security
-app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY', 'dev-secret-key')
+# Security Config
+app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY', 'super-secret-key-change-this')
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(days=7)
 
 CORS(app)
@@ -29,17 +29,19 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 db = SQLAlchemy(app)
 jwt = JWTManager(app)
 
-# --- NEW: HUGGING FACE API CONFIG ---
-# We use the API instead of loading the model locally to save RAM
+# --- HUGGING FACE API CONFIG (Cloud Friendly) ---
 HF_API_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
-# ideally use os.environ.get('HF_API_KEY') for security in production
-# Read the key from the environment variable
+# Get key from environment, or warn if missing
 HF_API_KEY = os.environ.get('HF_API_KEY')
 
 if not HF_API_KEY:
-    print("WARNING: HF_API_KEY not found. ML features will fail.")
+    print("WARNING: HF_API_KEY not found in environment variables. ML categorization will fail.")
 
 def classify_with_api(text, labels):
+    if not HF_API_KEY:
+        print("No API Key provided.")
+        return "Uncategorized", 0.0
+
     payload = {
         "inputs": text,
         "parameters": {"candidate_labels": labels}
@@ -51,7 +53,7 @@ def classify_with_api(text, labels):
         result = response.json()
         
         # The API returns data like: {'sequence': '...', 'labels': ['Quality', ...], 'scores': [0.9, ...]}
-        if 'labels' in result:
+        if 'labels' in result and len(result['labels']) > 0:
             return result['labels'][0], result['scores'][0]
         else:
             print("Model API Error:", result)
@@ -112,8 +114,10 @@ def register():
     data = request.get_json()
     if not data or not data.get('username') or not data.get('password'):
         return jsonify({'msg': 'Missing username or password'}), 400
+    
     if User.query.filter_by(username=data['username']).first():
         return jsonify({'msg': 'User already exists'}), 400
+    
     user = User(username=data['username'])
     user.set_password(data['password'])
     db.session.add(user)
@@ -124,9 +128,11 @@ def register():
 def login():
     data = request.get_json()
     user = User.query.filter_by(username=data.get('username')).first()
+    
     if user and user.check_password(data.get('password')):
         access_token = create_access_token(identity=user.id)
         return jsonify({'msg': 'Login successful', 'access_token': access_token, 'user': user.to_dict()}), 200
+        
     return jsonify({'msg': 'Invalid credentials'}), 401
 
 @app.route('/v1/feedback', methods=['POST'])
@@ -134,13 +140,13 @@ def add_feedback():
     data = request.get_json()
     if not data or 'text' not in data: return jsonify({"error": "Missing text"}), 400
 
-    # Sentiment (Local is fine, TextBlob is light)
+    # Sentiment Analysis (Local TextBlob is fast & light)
     blob = TextBlob(data['text'])
     sentiment = "Neutral"
     if blob.sentiment.polarity > 0.2: sentiment = "Positive"
     elif blob.sentiment.polarity < -0.1: sentiment = "Negative"
 
-    # Categorization (Via API now!)
+    # Categorization (Via Hugging Face API to save RAM)
     candidate_labels = ["Quality of food", "Customer service", "Speed", "Ambience"]
     category, confidence = classify_with_api(data['text'], candidate_labels)
 
@@ -166,22 +172,28 @@ def list_feedback():
     store_id = request.args.get('store_id')
     status = request.args.get('status')
     area = request.args.get('area')
+    
     query = Feedback.query
     if area: query = query.join(Store).filter(Store.area == area)
+
     if start:
         try:
             s_date = datetime.strptime(start, '%Y-%m-%d').date()
             query = query.filter(Feedback.timestamp >= s_date)
         except: pass
+    
     if end:
         try:
             e_date = datetime.strptime(end, '%Y-%m-%d').date() + timedelta(days=1)
             query = query.filter(Feedback.timestamp < e_date)
         except: pass
+
     if store_id: query = query.filter(Feedback.store_id == store_id)
     if status: query = query.filter(Feedback.status == status)
+
     per_page = int(request.args.get('per_page', 100))
     all_feedback = query.order_by(Feedback.timestamp.desc()).limit(per_page).all()
+    
     return jsonify({"feedback": [f.to_dict() for f in all_feedback]})
 
 @app.route('/v1/feedback/<int:id>/resolve', methods=['POST'])
@@ -198,9 +210,11 @@ def metrics():
     total = Feedback.query.count()
     cat_query = Feedback.query.group_by(Feedback.category).with_entities(
         Feedback.category, func.count(Feedback.id), func.avg(Feedback.sentiment_score)).all()
+    
     cats = {}
     for c, count, avg in cat_query:
         cats[c] = {"count": count, "average_sentiment_score": avg}
+        
     return jsonify({"total_feedback": total, "feedback_by_category": cats})
 
 @app.route('/v1/metrics/trend', methods=['GET'])
@@ -209,6 +223,7 @@ def trend():
         func.strftime('%Y-%m-%d', Feedback.timestamp).label('date'),
         func.avg(Feedback.sentiment_score).label('avg_sentiment')
     ).group_by('date').order_by('date').all()
+    
     return jsonify([{"date": r.date, "average_sentiment": r.avg_sentiment} for r in daily])
 
 @app.route('/v1/stores', methods=['GET', 'POST'])
@@ -219,6 +234,7 @@ def stores():
         db.session.add(new_store)
         db.session.commit()
         return jsonify({"message": "Store added", "id": new_store.id}), 201
+    
     area = request.args.get('area')
     query = Store.query
     if area: query = query.filter(Store.area == area)
